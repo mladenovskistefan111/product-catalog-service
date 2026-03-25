@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -11,12 +13,18 @@ import (
 
 	"product-catalog-service/internal/catalog"
 	pb "product-catalog-service/proto"
+
+	grpcprom "github.com/grpc-ecosystem/go-grpc-prometheus"
+	"github.com/grafana/pyroscope-go"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
@@ -41,7 +49,6 @@ func init() {
 
 func main() {
 	// --- Tracing (OpenTelemetry → Grafana Tempo) ---
-	// Set ENABLE_TRACING=1 and COLLECTOR_SERVICE_ADDR=<otel-collector:4317>
 	if os.Getenv("ENABLE_TRACING") == "1" {
 		if err := initTracing(); err != nil {
 			log.Warnf("tracing init failed, continuing without it: %v", err)
@@ -52,11 +59,12 @@ func main() {
 		log.Info("tracing disabled — set ENABLE_TRACING=1 to enable")
 	}
 
-	// --- Profiling (Pyroscope) ---
-	// TODO: uncomment when wiring up the LGTM stack
-	// if os.Getenv("ENABLE_PROFILING") == "1" {
-	//     initPyroscope()
-	// }
+	// --- Profiling (pprof HTTP + Pyroscope push) ---
+	if os.Getenv("ENABLE_PROFILING") == "1" {
+		initProfiling()
+	} else {
+		log.Info("profiling disabled — set ENABLE_PROFILING=1 to enable")
+	}
 
 	// --- Extra latency injection for chaos/load testing ---
 	var extraLatency time.Duration
@@ -70,7 +78,6 @@ func main() {
 	}
 
 	// --- Hot-reload toggle via Unix signals ---
-	// SIGUSR1 = enable reload on every request, SIGUSR2 = disable
 	reloadCatalog := false
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGUSR1, syscall.SIGUSR2)
@@ -110,8 +117,11 @@ func run(port string, extraLatency time.Duration, reloadFlag *bool) error {
 		),
 	)
 
+	// gRPC server with OTel tracing + Prometheus metrics interceptors
 	srv := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+		grpc.UnaryInterceptor(grpcprom.UnaryServerInterceptor),
+		grpc.StreamInterceptor(grpcprom.StreamServerInterceptor),
 	)
 
 	svc, err := catalog.NewProductCatalog(extraLatency, reloadFlag)
@@ -126,12 +136,30 @@ func run(port string, extraLatency time.Duration, reloadFlag *bool) error {
 	healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 	reflection.Register(srv)
 
+	// Register all gRPC server metrics with Prometheus
+	grpcprom.Register(srv)
+	grpcprom.EnableHandlingTimeHistogram()
+
+	// --- Metrics + pprof on the same HTTP server ---
+	go func() {
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle("/metrics", promhttp.Handler())
+		metricsMux.Handle("/debug/pprof/", http.DefaultServeMux)
+		metricsPort := "9090"
+		if p := os.Getenv("METRICS_PORT"); p != "" {
+			metricsPort = p
+		}
+		log.Infof("metrics + pprof endpoint on :%s", metricsPort)
+		if err := http.ListenAndServe(":"+metricsPort, metricsMux); err != nil {
+			log.Warnf("metrics server error: %v", err)
+		}
+	}()
+
 	log.Infof("listening on %s", listener.Addr().String())
 	return srv.Serve(listener)
 }
 
 // initTracing wires OpenTelemetry to an OTLP gRPC collector.
-// In the LGTM stack this points to Grafana Agent or OTel Collector → Tempo.
 func initTracing() error {
 	collectorAddr := os.Getenv("COLLECTOR_SERVICE_ADDR")
 	if collectorAddr == "" {
@@ -140,10 +168,11 @@ func initTracing() error {
 
 	ctx := context.Background()
 
+	// No otelgrpc handler on the exporter connection —
+	// we don't want to trace the act of exporting traces
 	conn, err := grpc.NewClient(
 		collectorAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to connect to collector %s: %w", collectorAddr, err)
@@ -154,10 +183,52 @@ func initTracing() error {
 		return fmt.Errorf("failed to create otlp exporter: %w", err)
 	}
 
+	// Tag all spans with the service name
+	serviceName := os.Getenv("OTEL_SERVICE_NAME")
+	if serviceName == "" {
+		serviceName = "product-catalog-service"
+	}
+
+	res, err := resource.New(ctx,
+		resource.WithAttributes(
+			semconv.ServiceNameKey.String(serviceName),
+		),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create resource: %w", err)
+	}
+
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exporter),
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithResource(res),
 	)
 	otel.SetTracerProvider(tp)
 	return nil
+}
+
+// initProfiling starts the Pyroscope push-based profiler.
+func initProfiling() {
+	pyroscopeAddr := os.Getenv("PYROSCOPE_ADDR")
+	if pyroscopeAddr == "" {
+		pyroscopeAddr = "http://pyroscope:4040"
+	}
+
+	_, err := pyroscope.Start(pyroscope.Config{
+		ApplicationName: "product-catalog-service",
+		ServerAddress:   pyroscopeAddr,
+		Logger:          pyroscope.StandardLogger,
+		ProfileTypes: []pyroscope.ProfileType{
+			pyroscope.ProfileCPU,
+			pyroscope.ProfileAllocObjects,
+			pyroscope.ProfileAllocSpace,
+			pyroscope.ProfileInuseObjects,
+			pyroscope.ProfileInuseSpace,
+		},
+	})
+	if err != nil {
+		log.Warnf("pyroscope init failed, continuing without it: %v", err)
+		return
+	}
+	log.Info("profiling enabled → pushing to " + pyroscopeAddr)
 }
