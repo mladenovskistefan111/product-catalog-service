@@ -95,9 +95,9 @@ func TestGetProductEmptyID(t *testing.T) {
 }
 
 func TestListProductsEmpty(t *testing.T) {
-    svc := &ProductCatalog{}
-    _, err := svc.ListProducts(context.Background(), &pb.Empty{})
-    if err == nil {
-        t.Error("expected error when catalog is empty and no DB, got nil")
-    }
+	svc := &ProductCatalog{}
+	_, err := svc.ListProducts(context.Background(), &pb.Empty{})
+	if err == nil {
+		t.Error("expected error when catalog is empty and no DB, got nil")
+	}
 }

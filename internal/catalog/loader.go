@@ -49,9 +49,9 @@ func InitDB(ctx context.Context) error {
 // LoadCatalog queries Postgres using the shared pool and populates the catalog.
 // It is safe to call from multiple goroutines.
 func LoadCatalog(catalog *pb.ListProductsResponse) error {
-    if pool == nil {
-        return fmt.Errorf("database pool not initialized")
-    }
+	if pool == nil {
+		return fmt.Errorf("database pool not initialized")
+	}
 	catalogMutex.Lock()
 	defer catalogMutex.Unlock()
 
