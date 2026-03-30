@@ -50,12 +50,20 @@ func (p *ProductCatalog) Watch(_ *healthpb.HealthCheckRequest, ws healthpb.Healt
 
 func (p *ProductCatalog) ListProducts(_ context.Context, _ *pb.Empty) (*pb.ListProductsResponse, error) {
 	time.Sleep(p.extraLatency)
-	return &pb.ListProductsResponse{Products: p.products()}, nil
+	products, err := p.products()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to load catalog: %v", err)
+	}
+	return &pb.ListProductsResponse{Products: products}, nil
 }
 
 func (p *ProductCatalog) GetProduct(_ context.Context, req *pb.GetProductRequest) (*pb.Product, error) {
 	time.Sleep(p.extraLatency)
-	for _, product := range p.products() {
+	products, err := p.products()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to load catalog: %v", err)
+	}
+	for _, product := range products {
 		if product.Id == req.Id {
 			return product, nil
 		}
@@ -65,9 +73,13 @@ func (p *ProductCatalog) GetProduct(_ context.Context, req *pb.GetProductRequest
 
 func (p *ProductCatalog) SearchProducts(_ context.Context, req *pb.SearchProductsRequest) (*pb.SearchProductsResponse, error) {
 	time.Sleep(p.extraLatency)
+	products, err := p.products()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to load catalog: %v", err)
+	}
 	query := strings.ToLower(req.Query)
 	var results []*pb.Product
-	for _, product := range p.products() {
+	for _, product := range products {
 		if strings.Contains(strings.ToLower(product.Name), query) ||
 			strings.Contains(strings.ToLower(product.Description), query) {
 			results = append(results, product)
@@ -80,17 +92,15 @@ func (p *ProductCatalog) SearchProducts(_ context.Context, req *pb.SearchProduct
 
 // products returns the in-memory catalog, reloading from Postgres only when
 // the SIGUSR1 reload flag is set (triggered externally) or the cache is empty.
-func (p *ProductCatalog) products() []*pb.Product {
+func (p *ProductCatalog) products() ([]*pb.Product, error) {
 	shouldReload := p.reloadFlag != nil && *p.reloadFlag
 	if shouldReload || len(p.catalog.Products) == 0 {
 		if err := LoadCatalog(&p.catalog); err != nil {
-			log.Errorf("failed to reload catalog: %v", err)
-			return []*pb.Product{}
+			return nil, err
 		}
-		// reset the flag after a successful reload
 		if p.reloadFlag != nil {
 			*p.reloadFlag = false
 		}
 	}
-	return p.catalog.Products
+	return p.catalog.Products, nil
 }
