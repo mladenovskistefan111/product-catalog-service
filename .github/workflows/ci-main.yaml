@@ -284,6 +284,18 @@ jobs:
           docker pull ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-db:latest
           kind load docker-image ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-db:latest --name ci
 
+      - name: Create secrets
+        run: |
+          kubectl create secret generic postgres-credentials \
+            --from-literal=POSTGRES_DB=product_catalog \
+            --from-literal=POSTGRES_USER=catalog_user \
+            --from-literal=POSTGRES_PASSWORD=catalog_pass \
+            -n ci-test
+
+          kubectl create secret generic product-catalog-secrets \
+            --from-literal=DATABASE_URL=postgresql://catalog_user:catalog_pass@postgres:5432/product_catalog \
+            -n ci-test
+
       - name: Apply manifests
         env:
           SERVICE_IMAGE: ${{ needs.build-and-stage.outputs.staged-image }}
