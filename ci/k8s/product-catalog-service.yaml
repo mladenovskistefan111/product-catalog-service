@@ -1,0 +1,89 @@
+# ── Secret ────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: product-catalog-secrets
+  namespace: ci-test
+type: Opaque
+data:
+  DATABASE_URL: cG9zdGdyZXNxbDovL2NhdGFsb2dfdXNlcjpjYXRhbG9nX3Bhc3NAcG9zdGdyZXM6NTQzMi9wcm9kdWN0X2NhdGFsb2c=
+
+---
+# ── Deployment ────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-catalog-service
+  namespace: ci-test
+  labels:
+    app: product-catalog-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: product-catalog-service
+  template:
+    metadata:
+      labels:
+        app: product-catalog-service
+    spec:
+      containers:
+        - name: product-catalog-service
+          image: ${SERVICE_IMAGE}
+          imagePullPolicy: Never           # use locally loaded image
+          ports:
+            - name: grpc
+              containerPort: 3550
+            - name: metrics
+              containerPort: 9090
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: product-catalog-secrets
+                  key: DATABASE_URL
+            - name: PORT
+              value: "3550"
+            - name: METRICS_PORT
+              value: "9090"
+            - name: ENABLE_TRACING
+              value: "0"
+            - name: ENABLE_PROFILING
+              value: "0"
+          readinessProbe:
+            grpc:
+              port: 3550
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            grpc:
+              port: 3550
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 16Mi
+            limits:
+              memory: 32Mi
+
+---
+# ── Service ───────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: product-catalog-service
+  namespace: ci-test
+  labels:
+    app: product-catalog-service
+spec:
+  selector:
+    app: product-catalog-service
+  ports:
+    - name: grpc
+      port: 3550
+      targetPort: 3550
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+  type: ClusterIP

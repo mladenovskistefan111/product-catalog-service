@@ -123,7 +123,7 @@ jobs:
     needs: [sca, sast]
     permissions:
       contents: read
-      packages: write                         # required to push to ghcr.io
+      packages: write
     outputs:
       staged-image: ${{ steps.image-ref.outputs.ref }}
       image-digest: ${{ steps.push.outputs.digest }}
@@ -136,7 +136,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}  # no setup needed, always available
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract image metadata
         id: meta
@@ -173,7 +173,7 @@ jobs:
     needs: [build-and-stage]
     permissions:
       contents: read
-      packages: read                          # required to pull from ghcr.io
+      packages: read
     steps:
       - name: Log in to ghcr.io
         uses: docker/login-action@v3
@@ -188,7 +188,7 @@ jobs:
           image-ref: ${{ needs.build-and-stage.outputs.staged-image }}
           format: table
           severity: CRITICAL,HIGH
-          exit-code: 1                        # block if CRITICAL or HIGH CVEs found
+          exit-code: 1
 
   # ─── STAGE 5 ──────────────────────────────────────────────────────────────
 
@@ -197,9 +197,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [scan-image, build-and-stage]
     permissions:
-      id-token: write                         # required for keyless cosign signing
+      id-token: write
       contents: read
-      packages: read                          # required to pull from ghcr.io
+      packages: read
 
     steps:
       - uses: actions/checkout@v5
@@ -234,7 +234,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true                          # scan passed — safe to push to production registry
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
@@ -245,3 +245,185 @@ jobs:
         run: |
           cosign sign --yes \
             ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-service@${{ steps.push.outputs.digest }}
+
+  # ─── STAGE 6 ──────────────────────────────────────────────────────────────
+
+  deploy-kind:
+    name: Deploy to kind
+    runs-on: ubuntu-latest
+    needs: [push-and-sign, build-and-stage]
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+
+      - name: Create kind cluster
+        run: kind create cluster --name ci --wait 60s
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull and load service image into kind
+        run: |
+          docker pull ${{ needs.build-and-stage.outputs.staged-image }}
+          kind load docker-image ${{ needs.build-and-stage.outputs.staged-image }} --name ci
+
+      - name: Pull and load postgres image into kind
+        run: |
+          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-db:latest
+          kind load docker-image ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-db:latest --name ci
+
+      - name: Apply manifests
+        env:
+          SERVICE_IMAGE: ${{ needs.build-and-stage.outputs.staged-image }}
+          DB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-db:latest
+        run: |
+          kubectl apply -f ci/k8s/namespace.yaml
+          envsubst < ci/k8s/product-catalog-db.yaml | kubectl apply -f -
+          envsubst < ci/k8s/product-catalog-service.yaml | kubectl apply -f -
+
+      - name: Wait for postgres ready
+        run: |
+          kubectl wait --for=condition=ready pod \
+            -l app=postgres \
+            -n platform-demo \
+            --timeout=120s
+
+      - name: Wait for service ready
+        run: |
+          kubectl wait --for=condition=ready pod \
+            -l app=product-catalog-service \
+            -n platform-demo \
+            --timeout=120s
+
+  # ─── STAGE 7 — Smoke Test ─────────────────────────────────────────────────
+
+  smoke-test:
+    name: Smoke Test
+    runs-on: ubuntu-latest
+    needs: [deploy-kind]
+
+    steps:
+      - name: Install grpcurl
+        run: |
+          curl -sSL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | tar -xz -C /usr/local/bin grpcurl
+
+      - name: Port forward service
+        run: |
+          kubectl port-forward svc/product-catalog-service 3550:3550 -n platform-demo &
+          sleep 3   # give port-forward time to establish
+
+      - name: Health check
+        run: |
+          response=$(grpcurl -plaintext localhost:3550 grpc.health.v1.Health/Check)
+          status=$(echo "$response" | grep -o '"status": "[^"]*"' | cut -d'"' -f4)
+          if [ "$status" != "SERVING" ]; then
+            echo "FAIL: expected SERVING, got $status"
+            exit 1
+          fi
+          echo "PASS: service is SERVING"
+
+  # ─── STAGE 8 — E2E Tests ──────────────────────────────────────────────────
+
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: [smoke-test]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5.4.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Port forward service
+        run: |
+          kubectl port-forward svc/product-catalog-service 3550:3550 -n platform-demo &
+          sleep 3
+
+      - name: Run e2e tests
+        run: go test -tags e2e ./tests/e2e/... -v -timeout 60s
+
+  # ─── STAGE 9 — Load Test ──────────────────────────────────────────────────
+
+  load-test:
+    name: Load Test
+    runs-on: ubuntu-latest
+    needs: [e2e-tests]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install ghz
+        run: |
+          curl -sSL https://github.com/bojand/ghz/releases/download/v0.120.0/ghz-linux-x86_64.tar.gz \
+            | tar -xz -C /usr/local/bin ghz
+
+      - name: Port forward service
+        run: |
+          kubectl port-forward svc/product-catalog-service 3550:3550 -n platform-demo &
+          sleep 3
+
+      - name: Run load test
+        run: |
+          ghz --insecure \
+            --proto proto/productcatalog.proto \
+            --call hipstershop.ProductCatalogService/ListProducts \
+            --rps 1000 \
+            -z 30s \
+            -c 10 \
+            --output json \
+            -O /tmp/ghz-result.json \
+            localhost:3550
+
+      - name: Check load test thresholds
+        run: |
+          ERROR_RATE=$(jq '.errorRate' /tmp/ghz-result.json)
+          P99=$(jq '.latencyDistribution[] | select(.percentage == 99) | .latency' /tmp/ghz-result.json)
+          P99_MS=$(echo "$P99 / 1000000" | bc)
+
+          echo "Error rate: $ERROR_RATE"
+          echo "p99 latency: ${P99_MS}ms"
+
+          # fail if error rate > 1%
+          if (( $(echo "$ERROR_RATE > 0.01" | bc -l) )); then
+            echo "FAIL: error rate ${ERROR_RATE} exceeds 1%"
+            exit 1
+          fi
+
+          # fail if p99 > 200ms
+          if (( P99_MS > 200 )); then
+            echo "FAIL: p99 latency ${P99_MS}ms exceeds 200ms"
+            exit 1
+          fi
+
+          echo "PASS: error rate=${ERROR_RATE} p99=${P99_MS}ms"
+
+  # ─── STAGE 10 — Teardown (always runs) ────────────────────────────────────
+
+  teardown:
+    name: Teardown kind
+    runs-on: ubuntu-latest
+    needs: [smoke-test, e2e-tests, load-test]
+    if: always()    # always run even if previous stages failed
+
+    steps:
+      - name: Delete kind cluster
+        run: kind delete cluster --name ci
