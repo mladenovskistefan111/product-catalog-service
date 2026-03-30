@@ -125,7 +125,7 @@ jobs:
       contents: read
       packages: write                         # required to push to ghcr.io
     outputs:
-      staged-image: ${{ steps.meta.outputs.tags }}
+      staged-image: ${{ steps.image-ref.outputs.ref }}
       image-digest: ${{ steps.push.outputs.digest }}
 
     steps:
@@ -158,6 +158,12 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Extract single image ref for scanning
+        id: image-ref
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "ref=ghcr.io/${{ github.repository }}:sha-${SHORT_SHA}" >> $GITHUB_OUTPUT
 
   # ─── STAGE 4 ──────────────────────────────────────────────────────────────
 
