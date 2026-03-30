@@ -6,6 +6,7 @@ import (
 	"time"
 
 	pb "product-catalog-service/proto"
+
 	"google.golang.org/grpc/codes"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
@@ -19,8 +20,12 @@ type ProductCatalog struct {
 	reloadFlag   *bool
 }
 
-// NewProductCatalog creates a ProductCatalog and loads the catalog immediately.
-func NewProductCatalog(extraLatency time.Duration, reloadFlag *bool) (*ProductCatalog, error) {
+// NewProductCatalog initialises the DB pool and loads the catalog into memory.
+func NewProductCatalog(ctx context.Context, extraLatency time.Duration, reloadFlag *bool) (*ProductCatalog, error) {
+	if err := InitDB(ctx); err != nil {
+		return nil, err
+	}
+
 	svc := &ProductCatalog{
 		extraLatency: extraLatency,
 		reloadFlag:   reloadFlag,
@@ -45,45 +50,46 @@ func (p *ProductCatalog) Watch(_ *healthpb.HealthCheckRequest, ws healthpb.Healt
 
 func (p *ProductCatalog) ListProducts(_ context.Context, _ *pb.Empty) (*pb.ListProductsResponse, error) {
 	time.Sleep(p.extraLatency)
-	return &pb.ListProductsResponse{Products: p.parseCatalog()}, nil
+	return &pb.ListProductsResponse{Products: p.products()}, nil
 }
 
 func (p *ProductCatalog) GetProduct(_ context.Context, req *pb.GetProductRequest) (*pb.Product, error) {
 	time.Sleep(p.extraLatency)
-
-	for _, product := range p.parseCatalog() {
+	for _, product := range p.products() {
 		if product.Id == req.Id {
 			return product, nil
 		}
 	}
-
 	return nil, status.Errorf(codes.NotFound, "no product with ID %s", req.Id)
 }
 
 func (p *ProductCatalog) SearchProducts(_ context.Context, req *pb.SearchProductsRequest) (*pb.SearchProductsResponse, error) {
 	time.Sleep(p.extraLatency)
-
 	query := strings.ToLower(req.Query)
-	results := make([]*pb.Product, 0)
-
-	for _, product := range p.parseCatalog() {
+	var results []*pb.Product
+	for _, product := range p.products() {
 		if strings.Contains(strings.ToLower(product.Name), query) ||
 			strings.Contains(strings.ToLower(product.Description), query) {
 			results = append(results, product)
 		}
 	}
-
 	return &pb.SearchProductsResponse{Results: results}, nil
 }
 
 // --- Internal ---
 
-func (p *ProductCatalog) parseCatalog() []*pb.Product {
+// products returns the in-memory catalog, reloading from Postgres only when
+// the SIGUSR1 reload flag is set (triggered externally) or the cache is empty.
+func (p *ProductCatalog) products() []*pb.Product {
 	shouldReload := p.reloadFlag != nil && *p.reloadFlag
 	if shouldReload || len(p.catalog.Products) == 0 {
 		if err := LoadCatalog(&p.catalog); err != nil {
 			log.Errorf("failed to reload catalog: %v", err)
 			return []*pb.Product{}
+		}
+		// reset the flag after a successful reload
+		if p.reloadFlag != nil {
+			*p.reloadFlag = false
 		}
 	}
 	return p.catalog.Products

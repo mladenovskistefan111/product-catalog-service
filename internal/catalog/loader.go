@@ -15,6 +15,7 @@ import (
 var (
 	log          *logrus.Logger
 	catalogMutex sync.Mutex
+	pool         *pgxpool.Pool
 )
 
 func init() {
@@ -23,29 +24,34 @@ func init() {
 	log.Out = os.Stdout
 }
 
-// LoadCatalog connects to Postgres via DATABASE_URL and loads all products.
-func LoadCatalog(catalog *pb.ListProductsResponse) error {
-	catalogMutex.Lock()
-	defer catalogMutex.Unlock()
-
+// InitDB creates the shared connection pool. Call once at startup.
+func InitDB(ctx context.Context) error {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		log.Fatal("DATABASE_URL is not set")
 	}
 
-	ctx := context.Background()
-
-	pool, err := pgxpool.New(ctx, dsn)
+	p, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
+	if err := p.Ping(ctx); err != nil {
+		p.Close()
 		return err
 	}
 
-	rows, err := pool.Query(ctx, `
+	pool = p
+	log.Info("connected to postgres")
+	return nil
+}
+
+// LoadCatalog queries Postgres using the shared pool and populates the catalog.
+// It is safe to call from multiple goroutines.
+func LoadCatalog(catalog *pb.ListProductsResponse) error {
+	catalogMutex.Lock()
+	defer catalogMutex.Unlock()
+
+	rows, err := pool.Query(context.Background(), `
 		SELECT id, name, description, picture,
 		       price_usd_currency_code, price_usd_units, price_usd_nanos,
 		       categories
@@ -61,7 +67,6 @@ func LoadCatalog(catalog *pb.ListProductsResponse) error {
 	for rows.Next() {
 		p := &pb.Product{PriceUsd: &pb.Money{}}
 		var categories string
-
 		if err := rows.Scan(
 			&p.Id, &p.Name, &p.Description, &p.Picture,
 			&p.PriceUsd.CurrencyCode, &p.PriceUsd.Units, &p.PriceUsd.Nanos,
@@ -69,7 +74,6 @@ func LoadCatalog(catalog *pb.ListProductsResponse) error {
 		); err != nil {
 			return err
 		}
-
 		p.Categories = strings.Split(strings.ToLower(categories), ",")
 		catalog.Products = append(catalog.Products, p)
 	}

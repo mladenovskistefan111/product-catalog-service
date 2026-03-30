@@ -124,7 +124,8 @@ func run(port string, extraLatency time.Duration, reloadFlag *bool) error {
 		grpc.StreamInterceptor(grpcprom.StreamServerInterceptor),
 	)
 
-	svc, err := catalog.NewProductCatalog(extraLatency, reloadFlag)
+	ctx := context.Background()
+	svc, err := catalog.NewProductCatalog(ctx, extraLatency, reloadFlag) // <-- only change
 	if err != nil {
 		return fmt.Errorf("failed to init product catalog: %w", err)
 	}
@@ -136,7 +137,6 @@ func run(port string, extraLatency time.Duration, reloadFlag *bool) error {
 	healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 	reflection.Register(srv)
 
-	// Register all gRPC server metrics with Prometheus
 	grpcprom.Register(srv)
 	grpcprom.EnableHandlingTimeHistogram()
 
@@ -168,8 +168,6 @@ func initTracing() error {
 
 	ctx := context.Background()
 
-	// No otelgrpc handler on the exporter connection —
-	// we don't want to trace the act of exporting traces
 	conn, err := grpc.NewClient(
 		collectorAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -183,7 +181,6 @@ func initTracing() error {
 		return fmt.Errorf("failed to create otlp exporter: %w", err)
 	}
 
-	// Tag all spans with the service name
 	serviceName := os.Getenv("OTEL_SERVICE_NAME")
 	if serviceName == "" {
 		serviceName = "product-catalog-service"
