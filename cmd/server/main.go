@@ -180,13 +180,11 @@ func run(port string, extraLatency time.Duration, reloadFlag *bool) error {
 // This avoids the blank import of net/http/pprof which unconditionally
 // registers handlers on DefaultServeMux (gosec G108).
 func registerPprofHandlers(mux *http.ServeMux) {
-	// Import net/http/pprof only for its side effects when we actually call it,
-	// but we register the handlers ourselves from the runtime/pprof package.
-	mux.HandleFunc("/debug/pprof/", pprofIndex)
-	mux.HandleFunc("/debug/pprof/cmdline", pprofCmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprofProfile)
-	mux.HandleFunc("/debug/pprof/symbol", pprofSymbol)
-	mux.HandleFunc("/debug/pprof/trace", pprofTrace)
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 }
 
 // initTracing wires OpenTelemetry to an OTLP gRPC collector.
