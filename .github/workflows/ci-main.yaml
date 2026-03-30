@@ -323,16 +323,16 @@ jobs:
             --timeout=120s
 
       - name: Save kubeconfig
-              run: |
-                mkdir -p /tmp/kind
-                kind get kubeconfig --name ci > /tmp/kind/kubeconfig
+        run: |
+          mkdir -p /tmp/kind
+          kind get kubeconfig --name ci > /tmp/kind/kubeconfig
 
-            - name: Upload kubeconfig
-              uses: actions/upload-artifact@v4
-              with:
-                name: kind-kubeconfig
-                path: /tmp/kind/kubeconfig
-                retention-days: 1
+      - name: Upload kubeconfig
+        uses: actions/upload-artifact@v4
+        with:
+          name: kind-kubeconfig
+          path: /tmp/kind/kubeconfig
+          retention-days: 1
 
   # ─── STAGE 7 — Smoke Test ─────────────────────────────────────────────────
 
@@ -386,6 +386,15 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      - name: Download kubeconfig
+        uses: actions/download-artifact@v4
+        with:
+          name: kind-kubeconfig
+          path: /tmp/kind
+
+      - name: Set kubeconfig
+        run: echo "KUBECONFIG=/tmp/kind/kubeconfig" >> $GITHUB_ENV
+
       - name: Download dependencies
         run: go mod download
 
@@ -411,6 +420,15 @@ jobs:
         run: |
           curl -sSL https://github.com/bojand/ghz/releases/download/v0.120.0/ghz-linux-x86_64.tar.gz \
             | tar -xz -C /usr/local/bin ghz
+
+      - name: Download kubeconfig
+        uses: actions/download-artifact@v4
+        with:
+          name: kind-kubeconfig
+          path: /tmp/kind
+
+      - name: Set kubeconfig
+        run: echo "KUBECONFIG=/tmp/kind/kubeconfig" >> $GITHUB_ENV
 
       - name: Port forward service
         run: |
