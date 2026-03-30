@@ -1,0 +1,193 @@
+name: CI - Main
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  # ─── STAGE 1 (parallel) ───────────────────────────────────────────────────
+
+  lint-format:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5.4.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l -e .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.11.4
+
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-check:
+    name: Build Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5.4.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Build
+        run: go build ./cmd/server/...
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5.4.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run tests
+        run: go test ./internal/... -v -race -count=1
+
+  # ─── STAGE 2 (parallel) ───────────────────────────────────────────────────
+
+  sca:
+    name: SCA - Dependency Vulnerabilities
+    runs-on: ubuntu-latest
+    needs: [lint-format, secret-scan, build-check, unit-tests]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5.4.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: govulncheck ./...
+
+  sast:
+    name: SAST - Static Security Analysis
+    runs-on: ubuntu-latest
+    needs: [lint-format, secret-scan, build-check, unit-tests]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5.4.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+
+      - name: Run gosec
+        run: gosec ./...
+
+  # ─── STAGE 3 ──────────────────────────────────────────────────────────────
+
+  build-image:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: [sca, sast]
+    outputs:
+      image-digest: ${{ steps.push.outputs.digest }}
+      image-ref: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-service
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # ─── STAGE 4 ──────────────────────────────────────────────────────────────
+
+  scan-image:
+    name: Scan Image for CVEs
+    runs-on: ubuntu-latest
+    needs: [build-image]
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ needs.build-image.outputs.image-ref }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: 1          # fails the pipeline if CRITICAL or HIGH CVEs found
+
+  # ─── STAGE 5 ──────────────────────────────────────────────────────────────
+
+  sign-image:
+    name: Sign Image
+    runs-on: ubuntu-latest
+    needs: [scan-image]
+    permissions:
+      id-token: write    # required for keyless cosign signing
+      contents: read
+
+    steps:
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Sign image
+        run: |
+          cosign sign --yes \
+            ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-service@${{ needs.build-image.outputs.image-digest }}
