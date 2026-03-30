@@ -63,3 +63,41 @@ func TestSearchProducts(t *testing.T) {
 		t.Errorf("got %d results, want %d", got, want)
 	}
 }
+
+func TestSearchProductsNoResults(t *testing.T) {
+	svc := newMockCatalog()
+	resp, err := svc.SearchProducts(context.Background(), &pb.SearchProductsRequest{Query: "zzznomatch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(resp.Results); got != 0 {
+		t.Errorf("got %d results, want 0", got)
+	}
+}
+
+func TestSearchProductsCaseInsensitive(t *testing.T) {
+	svc := newMockCatalog()
+	resp, err := svc.SearchProducts(context.Background(), &pb.SearchProductsRequest{Query: "ALPHA"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(resp.Results), 2; got != want {
+		t.Errorf("got %d results, want %d", got, want)
+	}
+}
+
+func TestGetProductEmptyID(t *testing.T) {
+	svc := newMockCatalog()
+	_, err := svc.GetProduct(context.Background(), &pb.GetProductRequest{Id: ""})
+	if got, want := status.Code(err), codes.NotFound; got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+func TestListProductsEmpty(t *testing.T) {
+    svc := &ProductCatalog{}
+    _, err := svc.ListProducts(context.Background(), &pb.Empty{})
+    if err == nil {
+        t.Error("expected error when catalog is empty and no DB, got nil")
+    }
+}
