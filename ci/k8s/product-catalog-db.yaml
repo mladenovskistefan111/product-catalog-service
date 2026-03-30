@@ -1,16 +1,3 @@
-# ── Secret ────────────────────────────────────────────────────────────────────
-apiVersion: v1
-kind: Secret
-metadata:
-  name: postgres-credentials
-  namespace: ci-test
-type: Opaque
-data:
-  # echo -n 'yourvalue' | base64
-  POSTGRES_DB:       cHJvZHVjdF9jYXRhbG9n        # product_catalog
-  POSTGRES_USER:     Y2F0YWxvZ191c2Vy              # catalog_user
-  POSTGRES_PASSWORD: Y2F0YWxvZ19wYXNz              # catalog_pass
-
 ---
 # ── PersistentVolumeClaim ─────────────────────────────────────────────────────
 apiVersion: v1
