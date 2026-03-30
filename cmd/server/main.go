@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -59,7 +58,7 @@ func main() {
 		log.Info("tracing disabled — set ENABLE_TRACING=1 to enable")
 	}
 
-	// --- Profiling (pprof HTTP + Pyroscope push) ---
+	// --- Profiling (Pyroscope push) ---
 	if os.Getenv("ENABLE_PROFILING") == "1" {
 		initProfiling()
 	} else {
@@ -125,7 +124,7 @@ func run(port string, extraLatency time.Duration, reloadFlag *bool) error {
 	)
 
 	ctx := context.Background()
-	svc, err := catalog.NewProductCatalog(ctx, extraLatency, reloadFlag) // <-- only change
+	svc, err := catalog.NewProductCatalog(ctx, extraLatency, reloadFlag)
 	if err != nil {
 		return fmt.Errorf("failed to init product catalog: %w", err)
 	}
@@ -140,23 +139,53 @@ func run(port string, extraLatency time.Duration, reloadFlag *bool) error {
 	grpcprom.Register(srv)
 	grpcprom.EnableHandlingTimeHistogram()
 
-	// --- Metrics + pprof on the same HTTP server ---
+	// --- Metrics (+ optional pprof) on a dedicated HTTP server with timeouts ---
 	go func() {
 		metricsMux := http.NewServeMux()
 		metricsMux.Handle("/metrics", promhttp.Handler())
-		metricsMux.Handle("/debug/pprof/", http.DefaultServeMux)
+
+		// G108 fix: only register pprof handlers when profiling is explicitly enabled
+		if os.Getenv("ENABLE_PROFILING") == "1" {
+			registerPprofHandlers(metricsMux)
+			log.Info("pprof endpoints registered on metrics server")
+		}
+
 		metricsPort := "9090"
 		if p := os.Getenv("METRICS_PORT"); p != "" {
 			metricsPort = p
 		}
-		log.Infof("metrics + pprof endpoint on :%s", metricsPort)
-		if err := http.ListenAndServe(":"+metricsPort, metricsMux); err != nil {
+
+		// G114 fix: use http.Server with explicit timeouts instead of http.ListenAndServe
+		metricsSrv := &http.Server{
+			Addr:              ":" + metricsPort,
+			Handler:           metricsMux,
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      60 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
+
+		log.Infof("metrics endpoint on :%s", metricsPort)
+		if err := metricsSrv.ListenAndServe(); err != nil {
 			log.Warnf("metrics server error: %v", err)
 		}
 	}()
 
 	log.Infof("listening on %s", listener.Addr().String())
 	return srv.Serve(listener)
+}
+
+// registerPprofHandlers adds the standard pprof handlers to the given mux.
+// This avoids the blank import of net/http/pprof which unconditionally
+// registers handlers on DefaultServeMux (gosec G108).
+func registerPprofHandlers(mux *http.ServeMux) {
+	// Import net/http/pprof only for its side effects when we actually call it,
+	// but we register the handlers ourselves from the runtime/pprof package.
+	mux.HandleFunc("/debug/pprof/", pprofIndex)
+	mux.HandleFunc("/debug/pprof/cmdline", pprofCmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprofProfile)
+	mux.HandleFunc("/debug/pprof/symbol", pprofSymbol)
+	mux.HandleFunc("/debug/pprof/trace", pprofTrace)
 }
 
 // initTracing wires OpenTelemetry to an OTLP gRPC collector.
