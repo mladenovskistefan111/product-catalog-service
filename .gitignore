@@ -1,0 +1,27 @@
+# Built binary
+product-catalog-service
+/bin/
+
+# Environment files — never commit secrets
+.env
+.env.*
+!.env.example
+
+# Go tooling
+*.test
+*.out
+coverage.html
+coverage.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
