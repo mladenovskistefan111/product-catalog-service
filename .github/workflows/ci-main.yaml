@@ -284,6 +284,10 @@ jobs:
           docker pull ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-db:latest
           kind load docker-image ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-db:latest --name ci
 
+      - name: Create namespace
+        run: |
+          kubectl apply -f ci/k8s/namespace.yaml
+
       - name: Create secrets
         run: |
           kubectl create secret generic postgres-credentials \
@@ -301,7 +305,6 @@ jobs:
           SERVICE_IMAGE: ${{ needs.build-and-stage.outputs.staged-image }}
           DB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-db:latest
         run: |
-          kubectl apply -f ci/k8s/namespace.yaml
           envsubst < ci/k8s/product-catalog-db.yaml | kubectl apply -f -
           envsubst < ci/k8s/product-catalog-service.yaml | kubectl apply -f -
 
