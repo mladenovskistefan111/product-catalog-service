@@ -312,14 +312,14 @@ jobs:
         run: |
           kubectl wait --for=condition=ready pod \
             -l app=postgres \
-            -n platform-demo \
+            -n ci-test \
             --timeout=120s
 
       - name: Wait for service ready
         run: |
           kubectl wait --for=condition=ready pod \
             -l app=product-catalog-service \
-            -n platform-demo \
+            -n ci-test \
             --timeout=120s
 
   # ─── STAGE 7 — Smoke Test ─────────────────────────────────────────────────
