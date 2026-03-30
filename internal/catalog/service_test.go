@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	pb "product-catalog-service/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	pb "product-catalog-service/proto"
 )
 
 // newMockCatalog builds a ProductCatalog with hardcoded products — no file I/O.
