@@ -337,7 +337,7 @@ jobs:
 
       - name: Port forward service
         run: |
-          kubectl port-forward svc/product-catalog-service 3550:3550 -n platform-demo &
+          kubectl port-forward svc/product-catalog-service 3550:3550 -n ci-test &
           sleep 3   # give port-forward time to establish
 
       - name: Health check
@@ -370,7 +370,7 @@ jobs:
 
       - name: Port forward service
         run: |
-          kubectl port-forward svc/product-catalog-service 3550:3550 -n platform-demo &
+          kubectl port-forward svc/product-catalog-service 3550:3550 -n ci-test &
           sleep 3
 
       - name: Run e2e tests
@@ -393,7 +393,7 @@ jobs:
 
       - name: Port forward service
         run: |
-          kubectl port-forward svc/product-catalog-service 3550:3550 -n platform-demo &
+          kubectl port-forward svc/product-catalog-service 3550:3550 -n ci-test &
           sleep 3
 
       - name: Run load test
