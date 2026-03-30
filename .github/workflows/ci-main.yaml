@@ -113,26 +113,20 @@ jobs:
         run: go install github.com/securego/gosec/v2/cmd/gosec@latest
 
       - name: Run gosec
-        run: gosec ./...
+        run: gosec -exclude-generated ./...   # skips files with "Code generated" header (proto files)
 
   # ─── STAGE 3 ──────────────────────────────────────────────────────────────
 
   build-image:
-    name: Build & Push Image
+    name: Build Image
     runs-on: ubuntu-latest
     needs: [sca, sast]
     outputs:
-      image-digest: ${{ steps.push.outputs.digest }}
-      image-ref: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-name: ${{ steps.meta.outputs.tags }}
 
     steps:
       - uses: actions/checkout@v5
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract image metadata
         id: meta
@@ -143,14 +137,18 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest
 
-      - name: Build and push
-        id: push
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push yet)
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: false                         # do NOT push yet — scan first
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=docker                # load into local docker daemon for scanning
 
   # ─── STAGE 4 ──────────────────────────────────────────────────────────────
 
@@ -162,24 +160,26 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ needs.build-image.outputs.image-ref }}
+          image-ref: ${{ needs.build-image.outputs.image-name }}
           format: table
           severity: CRITICAL,HIGH
-          exit-code: 1          # fails the pipeline if CRITICAL or HIGH CVEs found
+          exit-code: 1                        # block push if CRITICAL or HIGH CVEs found
 
   # ─── STAGE 5 ──────────────────────────────────────────────────────────────
 
-  sign-image:
-    name: Sign Image
+  push-and-sign:
+    name: Push & Sign Image
     runs-on: ubuntu-latest
-    needs: [scan-image]
+    needs: [scan-image, build-image]
     permissions:
-      id-token: write    # required for keyless cosign signing
+      id-token: write                         # required for keyless cosign signing
       contents: read
 
     steps:
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@v3
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -187,7 +187,18 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Push image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true                          # now safe to push — scan passed
+          tags: ${{ needs.build-image.outputs.image-name }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
       - name: Sign image
         run: |
           cosign sign --yes \
-            ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-service@${{ needs.build-image.outputs.image-digest }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-service@${{ steps.push.outputs.digest }}
