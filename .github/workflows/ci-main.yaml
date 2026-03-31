@@ -337,6 +337,20 @@ jobs:
             -n ci-test \
             --timeout=120s
 
+      # ── Integration tests (DB layer) ───────────────────────────────────
+
+      - name: Port forward postgres
+        run: |
+          kubectl port-forward svc/postgres 5432:5432 -n ci-test &
+          sleep 3
+
+      - name: Run integration tests
+        env:
+          DATABASE_URL: postgresql://catalog_user:catalog_pass@postgres:5432/product_catalog
+        run: go test -tags=integration ./tests/integration/... -v -timeout 30s
+    
+      # ── Wait for service ───────────────────────────────────────────────
+
       - name: Wait for service ready
         run: |
           kubectl wait --for=condition=ready pod \
