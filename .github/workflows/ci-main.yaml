@@ -246,10 +246,10 @@ jobs:
           cosign sign --yes \
             ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-service@${{ steps.push.outputs.digest }}
 
-  # ─── STAGE 6 ──────────────────────────────────────────────────────────────
+  # ─── STAGE 6 — Deploy & Test on kind ──────────────────────────────────────
 
-  deploy-kind:
-    name: Deploy to kind
+  integration-tests:
+    name: Integration & Load Tests
     runs-on: ubuntu-latest
     needs: [push-and-sign, build-and-stage]
     permissions:
@@ -258,6 +258,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5.4.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      # ── Cluster setup ──────────────────────────────────────────────────
 
       - name: Install kind
         uses: helm/kind-action@v1
@@ -285,8 +295,7 @@ jobs:
           kind load docker-image ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-db:latest --name ci
 
       - name: Create namespace
-        run: |
-          kubectl apply -f ci/k8s/namespace.yaml
+        run: kubectl apply -f ci/k8s/namespace.yaml
 
       - name: Create secrets
         run: |
@@ -322,46 +331,21 @@ jobs:
             -n ci-test \
             --timeout=120s
 
-      - name: Save kubeconfig
+      # ── Port forward ───────────────────────────────────────────────────
+
+      - name: Port forward service
         run: |
-          mkdir -p /tmp/kind
-          kind get kubeconfig --name ci > /tmp/kind/kubeconfig
+          kubectl port-forward svc/product-catalog-service 3550:3550 -n ci-test &
+          sleep 3
 
-      - name: Upload kubeconfig
-        uses: actions/upload-artifact@v4
-        with:
-          name: kind-kubeconfig
-          path: /tmp/kind/kubeconfig
-          retention-days: 1
+      # ── Smoke test ─────────────────────────────────────────────────────
 
-  # ─── STAGE 7 — Smoke Test ─────────────────────────────────────────────────
-
-  smoke-test:
-    name: Smoke Test
-    runs-on: ubuntu-latest
-    needs: [deploy-kind]
-
-    steps:
       - name: Install grpcurl
         run: |
           curl -sSL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
             | tar -xz -C /usr/local/bin grpcurl
 
-      - name: Download kubeconfig
-        uses: actions/download-artifact@v4
-        with:
-          name: kind-kubeconfig
-          path: /tmp/kind
-
-      - name: Set kubeconfig
-        run: echo "KUBECONFIG=/tmp/kind/kubeconfig" >> $GITHUB_ENV
-
-      - name: Port forward service
-        run: |
-          kubectl port-forward svc/product-catalog-service 3550:3550 -n ci-test &
-          sleep 3   # give port-forward time to establish
-
-      - name: Health check
+      - name: Smoke test - health check
         run: |
           response=$(grpcurl -plaintext localhost:3550 grpc.health.v1.Health/Check)
           status=$(echo "$response" | grep -o '"status": "[^"]*"' | cut -d'"' -f4)
@@ -371,71 +355,19 @@ jobs:
           fi
           echo "PASS: service is SERVING"
 
-  # ─── STAGE 8 — E2E Tests ──────────────────────────────────────────────────
+      # ── E2E tests ──────────────────────────────────────────────────────
 
-  e2e-tests:
-    name: E2E Tests
-    runs-on: ubuntu-latest
-    needs: [smoke-test]
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v5.4.0
-        with:
-          go-version-file: 'go.mod'
-          cache: true
-
-      - name: Download kubeconfig
-        uses: actions/download-artifact@v4
-        with:
-          name: kind-kubeconfig
-          path: /tmp/kind
-
-      - name: Set kubeconfig
-        run: echo "KUBECONFIG=/tmp/kind/kubeconfig" >> $GITHUB_ENV
-
-      - name: Download dependencies
-        run: go mod download
-
-      - name: Port forward service
-        run: |
-          kubectl port-forward svc/product-catalog-service 3550:3550 -n ci-test &
-          sleep 3
-
-      - name: Run e2e tests
+      - name: E2E tests
         run: go test -tags e2e ./tests/e2e/... -v -timeout 60s
 
-  # ─── STAGE 9 — Load Test ──────────────────────────────────────────────────
-
-  load-test:
-    name: Load Test
-    runs-on: ubuntu-latest
-    needs: [e2e-tests]
-
-    steps:
-      - uses: actions/checkout@v5
+      # ── Load test ──────────────────────────────────────────────────────
 
       - name: Install ghz
         run: |
           curl -sSL https://github.com/bojand/ghz/releases/download/v0.120.0/ghz-linux-x86_64.tar.gz \
             | tar -xz -C /usr/local/bin ghz
 
-      - name: Download kubeconfig
-        uses: actions/download-artifact@v4
-        with:
-          name: kind-kubeconfig
-          path: /tmp/kind
-
-      - name: Set kubeconfig
-        run: echo "KUBECONFIG=/tmp/kind/kubeconfig" >> $GITHUB_ENV
-
-      - name: Port forward service
-        run: |
-          kubectl port-forward svc/product-catalog-service 3550:3550 -n ci-test &
-          sleep 3
-
-      - name: Run load test
+      - name: Load test
         run: |
           ghz --insecure \
             --proto proto/productcatalog.proto \
@@ -456,13 +388,11 @@ jobs:
           echo "Error rate: $ERROR_RATE"
           echo "p99 latency: ${P99_MS}ms"
 
-          # fail if error rate > 1%
           if (( $(echo "$ERROR_RATE > 0.01" | bc -l) )); then
             echo "FAIL: error rate ${ERROR_RATE} exceeds 1%"
             exit 1
           fi
 
-          # fail if p99 > 200ms
           if (( P99_MS > 200 )); then
             echo "FAIL: p99 latency ${P99_MS}ms exceeds 200ms"
             exit 1
@@ -470,14 +400,8 @@ jobs:
 
           echo "PASS: error rate=${ERROR_RATE} p99=${P99_MS}ms"
 
-  # ─── STAGE 10 — Teardown (always runs) ────────────────────────────────────
+      # ── Teardown (always) ──────────────────────────────────────────────
 
-  teardown:
-    name: Teardown kind
-    runs-on: ubuntu-latest
-    needs: [smoke-test, e2e-tests, load-test]
-    if: always()    # always run even if previous stages failed
-
-    steps:
-      - name: Delete kind cluster
+      - name: Teardown kind cluster
+        if: always()
         run: kind delete cluster --name ci
