@@ -246,6 +246,19 @@ jobs:
           cosign sign --yes \
             ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-service@${{ steps.push.outputs.digest }}
 
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-service@${{ steps.push.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Attach SBOM to image
+        run: |
+          cosign attach sbom \
+            --sbom sbom.spdx.json \
+            ${{ secrets.DOCKERHUB_USERNAME }}/product-catalog-service@${{ steps.push.outputs.digest }}
+
   # ─── STAGE 6 — Deploy & Test on kind ──────────────────────────────────────
 
   integration-tests:
