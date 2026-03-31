@@ -375,8 +375,8 @@ jobs:
             --rps 1000 \
             -z 30s \
             -c 10 \
-            --output json \
-            -O /tmp/ghz-result.json \
+            --format json \
+            -o /tmp/ghz-result.json \
             localhost:3550
 
       - name: Check load test thresholds
