@@ -1,6 +1,7 @@
 name: CI - Main
 
 on:
+  workflow_dispatch: # manual trigger via GitHub Actions UI
   push:
     branches:
       - main
