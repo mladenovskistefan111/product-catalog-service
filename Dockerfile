@@ -14,7 +14,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 
 # --- Stage 2: Run ---
 # Switch from scratch to alpine so pprof/pyroscope have what they need
-FROM alpine:3.21
+FROM alpine:3.24
 
 WORKDIR /app
 
