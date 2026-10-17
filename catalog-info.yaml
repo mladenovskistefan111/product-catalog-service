@@ -12,6 +12,7 @@ metadata:
     backstage.io/kubernetes-label-selector: app.kubernetes.io/name=product-catalog-service
     argocd/app-name: dev-product-catalog-service
     grafana/dashboard-selector: "tags @> 'product-catalog'"
+    grafana/alert-label-selector: "service=product-catalog-service"
     grafana/overview-dashboard: "https://grafana.platform-demo.test/d/product-catalog-overview"
   tags: [go, grpc]
   links:
