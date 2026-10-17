@@ -1,0 +1,44 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: product-catalog-service
+  title: product-catalog-service
+  description: "A gRPC service that exposes the product catalog for the platform-demo e-commerce platform."
+  annotations:
+    github.com/project-slug: platform-boutique/app-product-catalog-service
+    backstage.io/techdocs-ref: dir:.
+    backstage.io/kubernetes-id: product-catalog-service
+    backstage.io/kubernetes-namespace: platform-demo
+    backstage.io/kubernetes-label-selector: app.kubernetes.io/name=product-catalog-service
+    argocd/app-name: dev-product-catalog-service
+    grafana/dashboard-selector: "tags @> 'product-catalog'"
+    grafana/overview-dashboard: "https://grafana.platform-demo.test/d/product-catalog-overview"
+  tags: [go, grpc]
+  links:
+    - { url: "https://github.com/platform-boutique/app-product-catalog-service", title: Repository, icon: github }
+    - { url: "https://argocd.platform-demo.test/applications/argocd/dev-product-catalog-service", title: Argo CD, icon: dashboard }
+    - { url: "https://grafana.platform-demo.test/d/product-catalog-overview", title: Grafana dashboard, icon: dashboard }
+spec:
+  type: service
+  lifecycle: experimental
+  owner: group:default/maintainers
+  system: shop
+  providesApis: [product-catalog-service-api]
+  dependsOn:
+    - component:default/product-catalog-db
+---
+apiVersion: backstage.io/v1alpha1
+kind: API
+metadata:
+  name: product-catalog-service-api
+  description: gRPC interface of product-catalog-service (Protocol Buffers).
+  tags: [grpc, protobuf]
+  links:
+    - { url: "https://github.com/platform-boutique/app-product-catalog-service/blob/main/proto/productcatalog.proto", title: "productcatalog.proto on GitHub", icon: code }
+spec:
+  type: grpc
+  lifecycle: experimental
+  owner: group:default/maintainers
+  system: shop
+  definition:
+    $text: ./proto/productcatalog.proto
