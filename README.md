@@ -1,111 +1,219 @@
 # product-catalog-service
 
-A gRPC service that exposes a product catalog for the platform-demo e-commerce platform. It serves product data from a PostgreSQL database and is part of a broader microservices platform built with full observability, GitOps, and internal developer platform tooling.
+A gRPC service that exposes the product catalog for the platform-demo e-commerce platform. It loads all products from PostgreSQL (`product-catalog-db`) into memory at startup and serves reads from that in-memory copy. It is the most widely used read service in the system — `frontend`, `checkout-service` and `recommendation-service` all call it.
 
-## Overview
+Part of the [platform-demo](https://github.com/mladenovskistefan111) platform — microservices, observability (LGTM stack), GitOps (Argo CD), policy enforcement (Kyverno), infrastructure provisioning (Crossplane) and an internal developer portal (Backstage). See the master `README.md` in the platform-demo root for the whole-system view.
 
-The service exposes three gRPC methods:
+## At a glance
 
-| Method | Description |
+| | |
 |---|---|
-| `ListProducts` | Returns all products in the catalog |
-| `GetProduct` | Returns a single product by ID |
-| `SearchProducts` | Searches products by name or description |
+| **Language / runtime** | Go 1.25 (static binary, `CGO_ENABLED=0`), `pgx/v5` |
+| **Image** | `mladenovskistefan/product-catalog-service` |
+| **Protocol / port** | gRPC (HTTP/2, plaintext) on `3550` |
+| **Metrics** | Pushed over OTLP/gRPC (Prometheus registry bridged into OpenTelemetry); `/metrics` on `9090` is still served for debugging |
+| **Health** | Standard `grpc.health.v1.Health/Check` on `3550` — static `SERVING`, does **not** reflect DB health |
+| **State** | In-memory copy of the `products` table; source of truth is Postgres |
+| **Depends on** | `product-catalog-db` (PostgreSQL) — **hard dependency at startup** |
+| **Called by** | `frontend`, `checkout-service`, `recommendation-service` |
+| **gRPC reflection** | Enabled — `grpcurl` works without `-proto` |
 
-**Port:** `3550` (gRPC)  
-**Protocol:** gRPC  
-**Language:** Go  
-**Database:** PostgreSQL (via `product-catalog-db`)
+## API
 
-## Requirements
+Package `hipstershop`, service `ProductCatalogService` ([`proto/productcatalog.proto`](proto/productcatalog.proto)).
 
-- Go 1.25+
-- Docker
-- A running PostgreSQL instance (see [product-catalog-db](https://github.com/mladenovskistefan111/product-catalog-db))
-- `grpcurl` for manual testing
+| Method | Request | Response | Behaviour |
+|---|---|---|---|
+| `ListProducts` | `Empty` | `{ repeated Product products }` | Returns all products |
+| `GetProduct` | `{ id }` | `Product` | Exact ID match; gRPC `NOT_FOUND` ("no product with ID …") otherwise |
+| `SearchProducts` | `{ query }` | `{ repeated Product results }` | Case-insensitive substring match on **name or description** |
 
-## Environment Variables
+`Product` = `{ id, name, description, picture, Money price_usd, repeated string categories }`. All prices are USD (`units` + `nanos`). `picture` is a relative path such as `/static/img/products/sunglasses.jpg` that is **served by `frontend`**, not by this service.
 
-| Variable | Required | Description |
+### Data source
+
+Query run against Postgres on load:
+
+```sql
+SELECT id, name, description, picture,
+       price_usd_currency_code, price_usd_units, price_usd_nanos, categories
+FROM products ORDER BY id
+```
+
+`categories` is a comma-separated text column; the service lowercases and splits it. The schema and 9 seed products come from the [`product-catalog-db`](../product-catalog-db) image.
+
+### Caching & reload
+
+- The catalog is loaded once at startup and cached in memory (per pod).
+- **SIGUSR1** arms a one-shot reload: the *next* request re-reads Postgres, then the flag clears. **SIGUSR2** disarms it. In Kubernetes: `kubectl exec deploy/product-catalog-service -- kill -USR1 1`.
+- If the cache is ever empty, every request re-queries Postgres.
+- Database changes are therefore **not** visible until a reload or a pod restart.
+
+## Configuration
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `DATABASE_URL` | **Yes** | — | Postgres connection string, e.g. `postgres://catalog:catalog@product-catalog-db:5432/productcatalog` (add `?sslmode=disable` if the server has no TLS and you want to skip negotiation). **Contains the password → treat as a Secret.** If unset the process logs fatal and exits |
+| `PORT` | No | `3550` | gRPC listen port |
+| `METRICS_PORT` | No | `9090` | Prometheus (+pprof) HTTP port |
+| `EXTRA_LATENCY` | No | none | Go duration (e.g. `200ms`) added to every `ListProducts`/`GetProduct`/`SearchProducts` call — for chaos/latency testing. Invalid value → fatal at startup |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | unset (telemetry off) | OTLP/**gRPC** endpoint for **traces, metrics and logs** (scheme required), e.g. `http://alloy.monitoring.svc.cluster.local:4317`. Legacy fallback: `COLLECTOR_SERVICE_ADDR` (`host:port`). Telemetry is on iff an endpoint is set |
+| `ENABLE_TRACING` | No | — | Legacy switch: `0` forces all telemetry off even if an endpoint is set (it is no longer needed to turn telemetry on) |
+| `OTEL_METRIC_EXPORT_INTERVAL` | No | `15000` | Milliseconds between metric pushes (Go also accepts durations such as `15s`) |
+| `OTEL_SERVICE_NAME` | No | `product-catalog-service` | `service.name` — becomes the Prometheus `job` and the Loki `service_name`; keep the default, dashboards depend on it |
+| `PYROSCOPE_ADDR` | No | `http://pyroscope:4040` | Profiles use the Pyroscope SDK push protocol (**not** OTLP). Point it at Alloy (`http://alloy.monitoring.svc.cluster.local:4040`), which forwards to Pyroscope, or directly at Pyroscope |
+| `ENABLE_PROFILING` | No | off | `1` starts the Pyroscope SDK **and** exposes `/debug/pprof/*` on the metrics port |
+
+Notes:
+
+- **Startup requires a reachable database.** `InitDB` opens a pgx pool and pings it; on failure the process exits non-zero (no retry). In Kubernetes this shows up as `CrashLoopBackOff` until Postgres is ready (with exponential back-off up to 5 min). Use an init container that waits for Postgres, or accept the restarts.
+- The Pyroscope application name is hard-coded to `product-catalog-service`.
+- pgx pool uses library defaults (no tuning knobs exposed).
+- Telemetry is **pushed**, not scraped: traces, metrics and logs share one OTLP/gRPC endpoint (Alloy); profiles go to Pyroscope (via Alloy). `service.instance.id` is the pod hostname, so replicas stay distinct in Mimir.
+- A Prometheus `/metrics` endpoint is still served on `METRICS_PORT` for debugging, but nothing has to scrape it — the same registry is bridged into OTLP, so metric names are unchanged.
+- Logs: the `logrus` logger keeps writing JSON to stdout and additionally mirrors every record over OTLP (with trace ids when a context is attached).
+
+## Container image
+
+Multi-stage [`Dockerfile`](Dockerfile):
+
+| Stage | Base | What happens |
 |---|---|---|
-| `DATABASE_URL` | Yes | Postgres connection string e.g. `postgres://user:pass@host:5432/db?sslmode=disable` |
-| `PORT` | No | gRPC server port (default: `3550`) |
-| `ENABLE_TRACING` | No | Set to `1` to enable OpenTelemetry tracing |
-| `COLLECTOR_SERVICE_ADDR` | No | OTel collector address e.g. `otel-collector:4317` (required if tracing enabled) |
-| `EXTRA_LATENCY` | No | Inject artificial latency e.g. `200ms` (for chaos/load testing) |
+| builder | `golang:1.25-alpine` | `go mod download`, then `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" ./cmd/server` |
+| runtime | `alpine:3.21` | single binary at `/app/product-catalog-service` (Alpine rather than `scratch` so pprof/Pyroscope have a normal userland) |
 
-## Running Locally
+- **Entrypoint:** `/app/product-catalog-service`. `GOTRACEBACK=single`.
+- **User: root** — no `USER` in the Dockerfile; the image runs as UID 0 (verified). The binary needs no privileges, so set a non-root `runAsUser` (e.g. `10001`) in Kubernetes.
+- **Architecture: `amd64` only** (`GOARCH=amd64` hard-coded) — fails with `exec format error` on `arm64` nodes.
+- **EXPOSE:** `3550`, `9090`. **No `HEALTHCHECK`.**
+- **Image size:** ~11 MB. `.dockerignore` excludes `vendor/` only.
 
-### 1. Start the database
+## Kubernetes deployment notes
 
-Follow the instructions in [product-catalog-db](https://github.com/mladenovskistefan111/product-catalog-db) to start a PostgreSQL container with the schema and seed data already baked in.
+**Workload:** stateless `Deployment` (state is in Postgres). Multiple replicas are safe; each keeps its own cache, so a reload signal must be sent to every pod. Caller connections are long-lived HTTP/2 — see "gRPC load balancing" in the master README.
 
-### 2. Build and run the service
+**Ports to declare**
 
-```bash
-go build ./...
-DATABASE_URL="postgres://catalog:catalog@localhost:5432/productcatalog?sslmode=disable" go run ./cmd/server
+| Name | Port | Protocol | Expose via Service? |
+|---|---|---|---|
+| `grpc` | `3550` | TCP (HTTP/2) | Yes — callers dial `product-catalog-service:3550` |
+| `metrics` | `9090` | TCP (HTTP/1.1) | Optional (debugging/pprof). Not scraped by default — metrics are pushed over OTLP |
+
+**Service DNS name expected by callers:** `product-catalog-service` (`frontend`, `checkout-service` and `recommendation-service` all use `product-catalog-service:3550`).
+
+**Init container (recommended)** — avoids a crash loop while Postgres comes up:
+
+```yaml
+initContainers:
+  - name: wait-for-db
+    image: mladenovskistefan/product-catalog-db:latest   # any image with pg_isready, e.g. postgres:17
+    command: ["sh", "-c", "until pg_isready -h product-catalog-db -p 5432 -U catalog -d productcatalog; do echo waiting; sleep 2; done"]
 ```
 
-### 3. Run with Docker
+**Probes** — the health endpoint is static, so these only prove the process is up (the process only starts serving once the DB load succeeded, so "up" implies "has data"):
+
+```yaml
+readinessProbe:
+  grpc: { port: 3550 }
+  periodSeconds: 5
+livenessProbe:
+  grpc: { port: 3550 }
+  periodSeconds: 10
+  failureThreshold: 3
+```
+
+**Security context**
+
+```yaml
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001        # image runs as root by default; any non-zero UID works
+  runAsGroup: 10001
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities: { drop: ["ALL"] }
+```
+
+**Resources** — requests sized from measured idle usage in the test stack (see the chart's `values.yaml` for limits):
+
+```yaml
+resources:
+  requests: { cpu: 50m, memory: 48Mi }
+  limits:   { cpu: "500m", memory: 128Mi }
+```
+
+**Config / secrets**
+
+- Put the **entire `DATABASE_URL`** in a `Secret` and inject with `secretKeyRef` (it embeds the Postgres password). Either template it from the same credentials secret the DB uses (`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`) or store it directly.
+- Everything else is plain env.
+
+**Telemetry:** pushed, not scraped — OTLP/gRPC to Alloy (`global.monitoring.otlpEndpoint`), profiles to Alloy `:4040`. Metrics carry `job="product-catalog-service"` and `instance=<pod>`; no scrape annotations or `ServiceMonitor` are needed.
+
+**Helm chart:** [`platform-demo-helm/product-catalog-service`](../platform-demo-helm/product-catalog-service) (built on the shared `platform-common` library chart). It ships with HA defaults — 2 replicas,
+HPA, PodDisruptionBudget, topology spread, NetworkPolicy, restricted pod security context, probes and the full env contract (see Configuration) —
+and was verified on a 3-node kind cluster under the `restricted` Pod Security Standard.
+
+## Observability
+
+| Signal | Implementation | Destination |
+|---|---|---|
+| **Traces** | OpenTelemetry (`otelgrpc`/`otelhttp` handlers), OTLP/gRPC exporter, `AlwaysSample`, W3C TraceContext + Baggage; the trace context is propagated to every downstream call | Alloy `:4317` → Tempo |
+| **Metrics** | The Prometheus default registry (`grpc_server_handled_total`, `grpc_server_handling_seconds_*`, `grpc_server_started_total`, `grpc_server_msg_*`, Go runtime/process) is bridged into OpenTelemetry and pushed over OTLP/gRPC every 15 s — metric names are unchanged. `/metrics` is still served for debugging | Alloy → Mimir |
+| **Logs** | `logrus` JSON to stdout **and** an OTLP/gRPC hook (`otellogrus`) (the `internal/catalog` logger is hooked too) | Alloy → Loki |
+| **Profiles** | Pyroscope Go SDK (CPU, alloc/inuse objects & space) plus pprof HTTP when profiling is on | Alloy `:4040` → Pyroscope |
+
+Every series carries `job="product-catalog-service"` (from `service.name`) and `instance=<pod name>` (`service.instance.id`), which is what the Grafana dashboards select on. Logs land in Loki with `service_name="product-catalog-service"` and trace/span ids, so a log line links to its trace.
+
+## Running locally
+
+Requirements: Go 1.25+, Docker, a Postgres seeded from [`product-catalog-db`](../product-catalog-db), [`grpcurl`](https://github.com/fullstorydev/grpcurl).
 
 ```bash
+# 1. database (see ../product-catalog-db)
+docker run -d --name catalog-postgres -p 5432:5432 \
+  -e POSTGRES_DB=productcatalog -e POSTGRES_USER=catalog -e POSTGRES_PASSWORD=catalog \
+  mladenovskistefan/product-catalog-db:latest
+
+# 2. service
+export DATABASE_URL="postgres://catalog:catalog@localhost:5432/productcatalog?sslmode=disable"
+go run ./cmd/server
+
+# or via Docker
 docker build -t product-catalog-service .
+docker run --rm --network host -e DATABASE_URL="$DATABASE_URL" product-catalog-service
 
-docker run -p 3550:3550 \
-  --network host \
-  -e DATABASE_URL="postgres://catalog:catalog@localhost:5432/productcatalog?sslmode=disable" \
-  product-catalog-service
-```
-
-## Testing
-
-### Unit tests
-
-```bash
 go test ./...
 ```
 
-### Manual gRPC testing
-
-Install `grpcurl` then:
+### Manual gRPC testing (reflection is on)
 
 ```bash
-# list all products
 grpcurl -plaintext localhost:3550 hipstershop.ProductCatalogService/ListProducts
-
-# get a product by ID
 grpcurl -plaintext -d '{"id": "OLJCESPC7Z"}' localhost:3550 hipstershop.ProductCatalogService/GetProduct
-
-# search products
-grpcurl -plaintext -d '{"query": "kitchen"}' localhost:3550 hipstershop.ProductCatalogService/SearchProducts
-
-# health check
+grpcurl -plaintext -d '{"query": "kitchen"}'  localhost:3550 hipstershop.ProductCatalogService/SearchProducts
 grpcurl -plaintext localhost:3550 grpc.health.v1.Health/Check
+curl -s localhost:9090/metrics | grep grpc_server
 ```
 
-## Project Structure
+Seed product IDs: `OLJCESPC7Z` (Sunglasses), `66VCHSJNUP` (Tank Top), `1YMWWN1N4O` (Watch), `L9ECAV7KIM` (Loafers), `2ZYFJ3GM2N` (Hairdryer), `0PUK6V6EV0` (Candle Holder), `LS4PSXUNUM` (Salt & Pepper Shakers), `9SIQT8TOJO` (Bamboo Glass Jar), `6E92ZMYYFZ` (Mug).
+
+## Project structure
 
 ```
-├── cmd/server/         # Binary entrypoint
-├── internal/catalog/   # Business logic — gRPC handlers and DB loader
-├── proto/              # Proto definition and generated gRPC code
-├── docs/               # Architecture decisions, runbooks, service contract
+├── cmd/server/main.go            # entrypoint: tracing, profiling, signals (SIGUSR1/2), gRPC server, metrics server
+├── internal/catalog/
+│   ├── loader.go                 # pgx pool (InitDB) + LoadCatalog (SELECT … FROM products)
+│   └── service.go                # gRPC handlers, in-memory cache, reload logic
+├── proto/                        # productcatalog.proto + generated Go
 ├── Dockerfile
-├── go.mod
-└── go.sum
+├── go.mod / go.sum
+└── docs/                         # empty placeholder
 ```
 
-## Documentation
+## Known limitations
 
-See [`docs/`](./docs) for:
-
-- Service contract and data model
-- Architecture decision records
-- Database schema
-- Observability (metrics, traces, logs)
-- Runbook
-
-## Part Of
-
-This service is part of [platform-demo](https://github.com/mladenovskistefan111) — a full platform engineering project featuring microservices, observability (LGTM stack), GitOps (Argo CD), policy enforcement (Kyverno), infrastructure provisioning (Crossplane), and an internal developer portal (Backstage).
+- Exits if Postgres is unreachable at startup (no retry/back-off in-process).
+- Health is static; it doesn't reflect DB availability.
+- Cache is per-pod and only refreshed by `SIGUSR1`/restart.
+- The reload flag is shared between goroutines without synchronisation (technically a data race; benign in practice).
+- `amd64`-only image that runs as root unless the pod overrides it.

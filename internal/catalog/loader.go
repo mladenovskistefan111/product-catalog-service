@@ -85,3 +85,6 @@ func LoadCatalog(catalog *pb.ListProductsResponse) error {
 	log.Infof("loaded %d products from postgres", len(catalog.Products))
 	return rows.Err()
 }
+
+// Logger exposes the package logger so the entrypoint can attach telemetry hooks to it.
+func Logger() *logrus.Logger { return log }
