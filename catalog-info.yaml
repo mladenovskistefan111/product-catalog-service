@@ -6,6 +6,7 @@ metadata:
   description: "A gRPC service that exposes the product catalog for the platform-demo e-commerce platform."
   annotations:
     github.com/project-slug: platform-boutique/app-product-catalog-service
+    backstage.io/source-location: url:https://github.com/platform-boutique/app-product-catalog-service/tree/main/
     backstage.io/techdocs-ref: dir:.
     backstage.io/kubernetes-id: product-catalog-service
     backstage.io/kubernetes-namespace: platform-demo
@@ -16,7 +17,6 @@ metadata:
     grafana/overview-dashboard: "https://grafana.platform-demo.test/d/product-catalog-overview"
   tags: [go, grpc]
   links:
-    - { url: "https://github.com/platform-boutique/app-product-catalog-service", title: Repository, icon: github }
     - { url: "https://argocd.platform-demo.test/applications/argocd/dev-product-catalog-service", title: Argo CD, icon: dashboard }
     - { url: "https://grafana.platform-demo.test/d/product-catalog-overview", title: Grafana dashboard, icon: dashboard }
 spec:
