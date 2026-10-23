@@ -14,11 +14,9 @@ metadata:
     argocd/app-name: dev-product-catalog-service
     grafana/dashboard-selector: "tags @> 'product-catalog'"
     grafana/alert-label-selector: "service=product-catalog-service"
-    grafana/overview-dashboard: "https://grafana.platform-demo.test/d/product-catalog-overview"
   tags: [go, grpc]
   links:
-    - { url: "https://argocd.platform-demo.test/applications/argocd/dev-product-catalog-service", title: Argo CD, icon: dashboard }
-    - { url: "https://grafana.platform-demo.test/d/product-catalog-overview", title: Grafana dashboard, icon: dashboard }
+    - { url: "https://argocd.platform-demo.click/applications/argocd/dev-product-catalog-service", title: Argo CD, icon: dashboard }
 spec:
   type: service
   lifecycle: experimental
