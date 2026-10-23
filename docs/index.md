@@ -44,8 +44,7 @@ flowchart LR
 ## Find it elsewhere
 
 <div class="pd-cards" markdown>
-<div><h4><a href="https://argocd.platform-demo.test/applications/argocd/dev-product-catalog-service">Argo CD</a></h4><p>Sync and health of <code>dev-product-catalog-service</code>.</p></div>
-<div><h4><a href="https://grafana.platform-demo.test/d/product-catalog-overview">Grafana</a></h4><p>Latency, traffic and errors (<code>product-catalog-overview</code>).</p></div>
+<div><h4><a href="https://argocd.platform-demo.click/applications/argocd/dev-product-catalog-service">Argo CD</a></h4><p>Sync and health of <code>dev-product-catalog-service</code>.</p></div>
 <div><h4><a href="https://github.com/platform-boutique/app-product-catalog-service">Repository</a></h4><p>Source, pull requests and releases of <code>app-product-catalog-service</code>.</p></div>
 </div>
 
